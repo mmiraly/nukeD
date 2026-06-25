@@ -96,17 +96,17 @@ nuked --older-than 1y
 
 ## TUI
 
-The TUI is the main workflow. It starts with a scan, then lets you filter,
-change age presets, select folders manually, review the result, and move
-selected dependency folders to the OS trash.
+The TUI is the main workflow. It starts with a scan, then lets you inspect the
+root/project tree, filter dependency folders, select folders manually, review
+the exact selected rows, and move them to the OS trash.
 
 Views:
 
 | View | Purpose |
 | --- | --- |
-| `scan` | Manage active roots and rescan |
+| `scan` | Manage active roots and expand root/project scan results |
 | `folders` | Browse, filter, and select dependency folders |
-| `review` | Confirm selected folders before cleanup |
+| `review` | Inspect selected folders before cleanup |
 | `help` | Show key bindings |
 
 Controls:
@@ -116,6 +116,9 @@ Controls:
 | `tab` / `l` / `→` | Next view |
 | `shift-tab` / `h` / `←` | Previous view |
 | `r` | Rescan current roots |
+| `enter` in `scan` | Expand/collapse a root or project |
+| `enter` in `folders` | Review selected folders |
+| `enter` in `review` | Move selected folders to the OS trash |
 | `j` / `↓` | Move down |
 | `k` / `↑` | Move up |
 | `/` | Fuzzy search |
@@ -129,8 +132,7 @@ Controls:
 | `n` | Clear selection |
 | `+` | Add a root in the `scan` view |
 | `d` | Remove the highlighted root in the `scan` view |
-| `enter` | Review selected folders, then confirm cleanup from review |
-| `esc` | Back or cancel input |
+| `esc` | Back or cancel input; quits only from top-level `scan` |
 | `?` | Open help |
 | `q` | Quit |
 

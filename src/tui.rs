@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -42,10 +42,14 @@ struct App {
     roots: Vec<PathBuf>,
     root_cursor: usize,
     root_input: String,
+    expanded_roots: HashSet<PathBuf>,
+    expanded_projects: HashSet<PathBuf>,
     selected: HashSet<PathBuf>,
     mode: Mode,
     tab: Tab,
+    previous_tab: Tab,
     message: String,
+    scan_status: ScanStatus,
     tick: usize,
 }
 
@@ -135,8 +139,34 @@ enum Mode {
     Browse,
     Search,
     RootInput,
-    Review,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanStatus {
+    Idle,
+    Refreshed { tick: usize, at: SystemTime },
+    Failed { tick: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScanTreeRow {
+    Root {
+        path: PathBuf,
+        folders: usize,
+        size: u64,
+    },
+    Project {
+        root: PathBuf,
+        path: PathBuf,
+        folders: usize,
+        size: u64,
+    },
+    Dependency {
+        root: PathBuf,
+        project: PathBuf,
+        folder_idx: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +210,7 @@ impl Tab {
 impl App {
     fn new(scan: ScanSummary, threshold: AgeThreshold, filter: String) -> Self {
         let roots = scan.roots.clone();
+        let expanded_roots = roots.iter().cloned().collect();
         let selected = scan
             .selected_for(threshold)
             .into_iter()
@@ -193,11 +224,15 @@ impl App {
             roots,
             root_cursor: 0,
             root_input: String::new(),
+            expanded_roots,
+            expanded_projects: HashSet::new(),
             selected,
             mode: Mode::Browse,
             tab: Tab::Folders,
+            previous_tab: Tab::Folders,
             message: "r scan  tab switch  space select  / search  enter review  ? help  q quit"
                 .to_string(),
+            scan_status: ScanStatus::Idle,
             tick: 0,
         }
     }
@@ -235,10 +270,16 @@ impl App {
 
             match self.mode {
                 Mode::Browse => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    KeyCode::Char('q') => break,
+                    KeyCode::Esc => {
+                        if self.back() {
+                            break;
+                        }
+                    }
                     KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => self.next_tab(),
                     KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => self.previous_tab(),
                     KeyCode::Char('?') => {
+                        self.previous_tab = self.tab;
                         self.tab = Tab::Help;
                         self.message = "tab switch  r scan  q quit".to_string();
                     }
@@ -251,6 +292,7 @@ impl App {
                     KeyCode::Char('d') if self.tab == Tab::Scan => self.remove_current_root(),
                     KeyCode::Down | KeyCode::Char('j') => self.move_cursor(1),
                     KeyCode::Up | KeyCode::Char('k') => self.move_cursor(-1),
+                    KeyCode::Char(' ') if self.tab == Tab::Scan => self.toggle_scan_dependency(),
                     KeyCode::Char(' ') if self.tab == Tab::Folders => self.toggle_current(),
                     KeyCode::Char('a') if self.tab == Tab::Folders => self.select_ready_visible(),
                     KeyCode::Char('A') if self.tab == Tab::Folders => self.select_all_visible(),
@@ -260,11 +302,8 @@ impl App {
                         self.message =
                             "type to fuzzy search  backspace: edit  esc/enter: apply".to_string();
                     }
-                    KeyCode::Enter => {
-                        self.tab = Tab::Review;
-                        self.mode = Mode::Review;
-                        self.message = self.review_message();
-                    }
+                    KeyCode::Enter if self.tab == Tab::Review => self.trash_selected(cleaner),
+                    KeyCode::Enter => self.activate_current(),
                     KeyCode::Char('1') => self.set_threshold(AgeThreshold::days(7)),
                     KeyCode::Char('2') => self.set_threshold(AgeThreshold::days(30)),
                     KeyCode::Char('3') => self.set_threshold(AgeThreshold::days(90)),
@@ -300,15 +339,6 @@ impl App {
                     KeyCode::Char(ch) => {
                         self.root_input.push(ch);
                     }
-                    _ => {}
-                },
-                Mode::Review => match key.code {
-                    KeyCode::Esc => {
-                        self.mode = Mode::Browse;
-                        self.message = self.browse_message();
-                    }
-                    KeyCode::Char('q') => break,
-                    KeyCode::Enter => self.trash_selected(cleaner),
                     _ => {}
                 },
                 Mode::Done => {}
@@ -435,6 +465,8 @@ impl App {
                 ),
                 Span::styled("  total ", Style::default().fg(Theme::MUTED)),
                 Span::styled(bytes(visible_total), metric_style()),
+                Span::styled("  scan ", Style::default().fg(Theme::MUTED)),
+                self.scan_status_span(),
             ]),
         ];
 
@@ -477,6 +509,10 @@ impl App {
                 Span::styled("  visible ", Style::default().fg(Theme::MUTED)),
                 Span::styled(visible.to_string(), metric_style()),
             ]),
+            Line::from(vec![
+                Span::styled("scan ", Style::default().fg(Theme::MUTED)),
+                self.scan_status_span(),
+            ]),
             Line::from(vec![Span::styled(
                 format!("[{scanline}]"),
                 Style::default().fg(Theme::MINT),
@@ -508,6 +544,7 @@ impl App {
                 Row::new(vec![
                     Cell::from("+"),
                     Cell::from("new"),
+                    Cell::from(""),
                     Cell::from(if self.root_input.is_empty() {
                         "type a root path".to_string()
                     } else {
@@ -522,79 +559,173 @@ impl App {
             );
         }
 
-        rows.extend(self.roots.iter().enumerate().map(|(idx, root)| {
-            let style = if idx == self.root_cursor {
-                Style::default()
-                    .fg(Theme::TEXT)
-                    .bg(Theme::DARK)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::TEXT)
-            };
-            Row::new(vec![
-                Cell::from(if idx == self.root_cursor { ">" } else { " " }),
-                Cell::from("active"),
-                Cell::from(root.display().to_string()),
-            ])
-            .style(style)
-        }));
+        rows.extend(
+            self.scan_tree_rows()
+                .into_iter()
+                .enumerate()
+                .map(|(idx, row)| {
+                    let style = if idx == self.root_cursor {
+                        Style::default()
+                            .fg(Theme::TEXT)
+                            .bg(Theme::DARK)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Theme::TEXT)
+                    };
+                    let cells = match row {
+                        ScanTreeRow::Root {
+                            path,
+                            folders,
+                            size,
+                        } => {
+                            let expanded = self.expanded_roots.contains(&path);
+                            vec![
+                                Cell::from(if idx == self.root_cursor { ">" } else { " " }),
+                                Cell::from(if expanded { "v root" } else { "> root" }),
+                                Cell::from(format!("{folders} deps  {}", bytes(size))),
+                                Cell::from(path.display().to_string()),
+                            ]
+                        }
+                        ScanTreeRow::Project {
+                            path,
+                            folders,
+                            size,
+                            ..
+                        } => {
+                            let expanded = self.expanded_projects.contains(&path);
+                            vec![
+                                Cell::from(if idx == self.root_cursor { ">" } else { " " }),
+                                Cell::from(if expanded { "  v app" } else { "  > app" }),
+                                Cell::from(format!("{folders} deps  {}", bytes(size))),
+                                Cell::from(path.display().to_string()),
+                            ]
+                        }
+                        ScanTreeRow::Dependency { folder_idx, .. } => {
+                            let folder = &self.scan.folders[folder_idx];
+                            let marker = if self.selected.contains(&folder.path) {
+                                "[x]"
+                            } else {
+                                "[ ]"
+                            };
+                            vec![
+                                Cell::from(if idx == self.root_cursor { ">" } else { " " }),
+                                Cell::from(format!("    {marker}")),
+                                Cell::from(format!(
+                                    "{}  {}  {}",
+                                    folder.kind.label(),
+                                    bytes(folder.size_bytes),
+                                    status_label(folder.is_older_than(self.threshold))
+                                )),
+                                Cell::from(folder.path.display().to_string()),
+                            ]
+                        }
+                    };
+                    Row::new(cells).style(style)
+                }),
+        );
 
         Table::new(
             rows,
             [
                 Constraint::Length(2),
-                Constraint::Length(8),
-                Constraint::Percentage(90),
+                Constraint::Length(10),
+                Constraint::Length(24),
+                Constraint::Percentage(80),
             ],
         )
         .header(
-            Row::new(["", "state", "root"]).style(
+            Row::new(["", "node", "summary", "path"]).style(
                 Style::default()
                     .fg(Theme::MINT)
                     .add_modifier(Modifier::BOLD),
             ),
         )
-        .block(Self::panel_block("scan roots  r rescan  + add  d remove"))
+        .block(Self::panel_block(
+            "scan tree  enter expand  space select  r rescan  + add  d remove",
+        ))
     }
 
-    fn review_widget(&self) -> Paragraph<'_> {
-        let lines = vec![
-            Line::from(vec![
-                Span::styled("selected ", Style::default().fg(Theme::MUTED)),
-                Span::styled(self.selected.len().to_string(), metric_style()),
-                Span::styled("  reclaim ", Style::default().fg(Theme::MUTED)),
-                Span::styled(bytes(self.selected_bytes()), metric_style()),
-                Span::styled("  manual/newer ", Style::default().fg(Theme::MUTED)),
-                Span::styled(
-                    self.selected_newer_count().to_string(),
-                    if self.selected_newer_count() > 0 {
-                        Style::default()
-                            .fg(Theme::AMBER)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        metric_style()
-                    },
-                ),
-            ]),
-            Line::from(""),
-            Line::from("enter moves selected dependency folders to the OS trash"),
-            Line::from("esc returns to folders without changing anything"),
-            Line::from("q quits"),
-            Line::from(""),
-            Line::from(self.review_message()),
-        ];
+    fn review_widget(&self) -> Table<'_> {
+        let selected = self.selected_folder_indices();
+        let rows: Vec<Row<'_>> = if selected.is_empty() {
+            vec![
+                Row::new(vec![
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from("nothing selected"),
+                    Cell::from("return to folders and press space to select rows"),
+                ])
+                .style(Style::default().fg(Theme::MUTED)),
+            ]
+        } else {
+            selected
+                .into_iter()
+                .enumerate()
+                .map(|(row_idx, folder_idx)| self.row_for(row_idx, &self.scan.folders[folder_idx]))
+                .collect()
+        };
 
-        Paragraph::new(lines).block(Self::panel_block("review"))
+        Table::new(
+            rows,
+            [
+                Constraint::Length(3),
+                Constraint::Length(8),
+                Constraint::Length(12),
+                Constraint::Length(8),
+                Constraint::Length(7),
+                Constraint::Percentage(30),
+                Constraint::Percentage(50),
+            ],
+        )
+        .header(
+            Row::new(["", "kind", "size", "age", "status", "project", "dependency"]).style(
+                Style::default()
+                    .fg(Theme::MINT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(Self::panel_block("review selected  enter trash  esc back"))
     }
 
     fn help_widget(&self) -> Paragraph<'_> {
         Paragraph::new(vec![
-            Line::from("tab/right/l: next tab    shift-tab/left/h: previous tab"),
-            Line::from("r: rescan current roots  /: fuzzy search  1-4: age presets"),
-            Line::from("space: toggle row        a: select ready  A: select all visible"),
-            Line::from("n: clear selection       enter: review    q: quit"),
-            Line::from("scan tab: + add root     d: remove root   j/k: move"),
-            Line::from("search and root input: enter apply, esc cancel"),
+            Line::from(vec![Span::styled(
+                "Navigation",
+                Style::default()
+                    .fg(Theme::MINT)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  tab/l/right next view    shift-tab/h/left previous view"),
+            Line::from("  esc back                 q quit"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Scan",
+                Style::default()
+                    .fg(Theme::MINT)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  r rescan                 enter expand/collapse root or project"),
+            Line::from("  + add root               d remove root"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Folders",
+                Style::default()
+                    .fg(Theme::MINT)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  / fuzzy search           1-4 age presets"),
+            Line::from("  space toggle             a ready  A all  n clear"),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "Review",
+                Style::default()
+                    .fg(Theme::MINT)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from("  enter trash selected     esc return to folders"),
         ])
         .block(Self::panel_block("help"))
     }
@@ -671,11 +802,12 @@ impl App {
 
     fn move_cursor(&mut self, delta: isize) {
         if self.tab == Tab::Scan {
-            if self.roots.is_empty() {
+            let tree_len = self.scan_tree_rows().len();
+            if tree_len == 0 {
                 self.root_cursor = 0;
                 return;
             }
-            let len = self.roots.len() as isize;
+            let len = tree_len as isize;
             self.root_cursor = (self.root_cursor as isize + delta).clamp(0, len - 1) as usize;
         } else {
             let visible_len = self.visible_indices().len();
@@ -688,8 +820,88 @@ impl App {
         }
     }
 
+    fn activate_current(&mut self) {
+        match self.tab {
+            Tab::Scan => self.activate_scan_row(),
+            Tab::Folders => {
+                if self.selected.is_empty() {
+                    self.message = "select at least one folder before review".to_string();
+                } else {
+                    self.previous_tab = self.tab;
+                    self.tab = Tab::Review;
+                    self.message = self.review_message();
+                }
+            }
+            Tab::Review => {}
+            Tab::Help => self.back_to_previous(),
+        }
+    }
+
+    fn activate_scan_row(&mut self) {
+        let Some(row) = self.scan_tree_rows().get(self.root_cursor).cloned() else {
+            return;
+        };
+
+        match row {
+            ScanTreeRow::Root { path, .. } => {
+                toggle_path(&mut self.expanded_roots, path);
+                self.message = "toggled root".to_string();
+            }
+            ScanTreeRow::Project { path, .. } => {
+                toggle_path(&mut self.expanded_projects, path);
+                self.message = "toggled project".to_string();
+            }
+            ScanTreeRow::Dependency { folder_idx, .. } => {
+                self.toggle_folder_idx(folder_idx);
+            }
+        }
+    }
+
+    fn back(&mut self) -> bool {
+        match self.tab {
+            Tab::Scan => true,
+            Tab::Folders => {
+                self.previous_tab = self.tab;
+                self.tab = Tab::Scan;
+                self.message = self.browse_message();
+                false
+            }
+            Tab::Review => {
+                self.tab = Tab::Folders;
+                self.message = self.browse_message();
+                false
+            }
+            Tab::Help => {
+                self.back_to_previous();
+                false
+            }
+        }
+    }
+
+    fn back_to_previous(&mut self) {
+        self.tab = self.previous_tab;
+        self.message = self.browse_message();
+    }
+
     fn toggle_current(&mut self) {
-        let Some(folder) = self.current_folder() else {
+        let visible = self.visible_indices();
+        let Some(folder_idx) = visible.get(self.cursor) else {
+            return;
+        };
+        self.toggle_folder_idx(*folder_idx);
+    }
+
+    fn toggle_scan_dependency(&mut self) {
+        let Some(ScanTreeRow::Dependency { folder_idx, .. }) =
+            self.scan_tree_rows().get(self.root_cursor).cloned()
+        else {
+            return;
+        };
+        self.toggle_folder_idx(folder_idx);
+    }
+
+    fn toggle_folder_idx(&mut self, folder_idx: usize) {
+        let Some(folder) = self.scan.folders.get(folder_idx) else {
             return;
         };
         let path = folder.path.clone();
@@ -756,12 +968,14 @@ impl App {
     }
 
     fn next_tab(&mut self) {
+        self.previous_tab = self.tab;
         self.tab = self.tab.next();
         self.mode = Mode::Browse;
         self.message = self.browse_message();
     }
 
     fn previous_tab(&mut self) {
+        self.previous_tab = self.tab;
         self.tab = self.tab.previous();
         self.mode = Mode::Browse;
         self.message = self.browse_message();
@@ -779,10 +993,16 @@ impl App {
                 self.scan = scan;
                 self.selected.clear();
                 self.cursor = 0;
+                self.root_cursor = 0;
                 self.clamp_cursor();
+                self.scan_status = ScanStatus::Refreshed {
+                    tick: self.tick,
+                    at: SystemTime::now(),
+                };
                 self.message = format!("scanned {} folder(s)", self.scan.folders.len());
             }
             Err(err) => {
+                self.scan_status = ScanStatus::Failed { tick: self.tick };
                 self.message = format!("scan failed: {err}");
             }
         }
@@ -811,11 +1031,16 @@ impl App {
             return;
         }
 
-        if self.root_cursor < self.roots.len() {
-            let removed = self.roots.remove(self.root_cursor);
-            if self.root_cursor >= self.roots.len() {
-                self.root_cursor = self.roots.len().saturating_sub(1);
-            }
+        let Some(root) = self.highlighted_tree_root() else {
+            self.message = "highlight a root or project before removing".to_string();
+            return;
+        };
+
+        if let Some(index) = self.roots.iter().position(|candidate| *candidate == root) {
+            let removed = self.roots.remove(index);
+            self.root_cursor = self
+                .root_cursor
+                .min(self.scan_tree_rows().len().saturating_sub(1));
             self.rescan();
             self.message = format!(
                 "removed root {}; scanned {} folder(s)",
@@ -842,6 +1067,145 @@ impl App {
                 self.selected.contains(&folder.path) && !folder.is_older_than(self.threshold)
             })
             .count()
+    }
+
+    fn selected_folder_indices(&self) -> Vec<usize> {
+        self.scan
+            .folders
+            .iter()
+            .enumerate()
+            .filter(|(_, folder)| self.selected.contains(&folder.path))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    fn scan_status_span(&self) -> Span<'static> {
+        match self.scan_status {
+            ScanStatus::Idle => Span::styled("ready", metric_style()),
+            ScanStatus::Refreshed { tick, at } => {
+                let elapsed = self.tick.saturating_sub(tick);
+                let pulse = if elapsed < 16 { "refresh" } else { "ready" };
+                let since_epoch = at
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let seconds = since_epoch % 86_400;
+                let hour = seconds / 3_600;
+                let minute = (seconds % 3_600) / 60;
+                let second = seconds % 60;
+                Span::styled(
+                    format!("{pulse} {hour:02}:{minute:02}:{second:02}"),
+                    Style::default()
+                        .fg(if elapsed < 16 {
+                            Theme::AMBER
+                        } else {
+                            Theme::GREEN
+                        })
+                        .add_modifier(if elapsed < 16 {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                )
+            }
+            ScanStatus::Failed { tick } => {
+                let elapsed = self.tick.saturating_sub(tick);
+                Span::styled(
+                    if elapsed < 16 { "failed!" } else { "failed" },
+                    Style::default()
+                        .fg(Theme::RED)
+                        .add_modifier(if elapsed < 16 {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                )
+            }
+        }
+    }
+
+    fn scan_tree_rows(&self) -> Vec<ScanTreeRow> {
+        let mut rows = Vec::new();
+        let mut by_root: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+
+        for (idx, folder) in self.scan.folders.iter().enumerate() {
+            let root = self.root_for_folder(folder);
+            by_root.entry(root).or_default().push(idx);
+        }
+
+        for root in &self.roots {
+            let folder_indices = by_root.get(root).cloned().unwrap_or_default();
+            let root_size = folder_indices
+                .iter()
+                .map(|idx| self.scan.folders[*idx].size_bytes)
+                .sum();
+            rows.push(ScanTreeRow::Root {
+                path: root.clone(),
+                folders: folder_indices.len(),
+                size: root_size,
+            });
+
+            if !self.expanded_roots.contains(root) {
+                continue;
+            }
+
+            let mut projects: Vec<PathBuf> = folder_indices
+                .iter()
+                .map(|idx| self.scan.folders[*idx].project_path.clone())
+                .collect();
+            projects.sort();
+            projects.dedup();
+
+            for project in projects {
+                let project_indices: Vec<usize> = folder_indices
+                    .iter()
+                    .copied()
+                    .filter(|idx| self.scan.folders[*idx].project_path == project)
+                    .collect();
+                let project_size = project_indices
+                    .iter()
+                    .map(|idx| self.scan.folders[*idx].size_bytes)
+                    .sum();
+                rows.push(ScanTreeRow::Project {
+                    root: root.clone(),
+                    path: project.clone(),
+                    folders: project_indices.len(),
+                    size: project_size,
+                });
+
+                if !self.expanded_projects.contains(&project) {
+                    continue;
+                }
+
+                rows.extend(project_indices.into_iter().map(|folder_idx| {
+                    ScanTreeRow::Dependency {
+                        root: root.clone(),
+                        project: project.clone(),
+                        folder_idx,
+                    }
+                }));
+            }
+        }
+
+        rows
+    }
+
+    fn root_for_folder(&self, folder: &DependencyFolder) -> PathBuf {
+        self.roots
+            .iter()
+            .filter(|root| folder.project_path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .cloned()
+            .unwrap_or_else(|| self.roots.first().cloned().unwrap_or_default())
+    }
+
+    fn highlighted_tree_root(&self) -> Option<PathBuf> {
+        match self.scan_tree_rows().get(self.root_cursor)? {
+            ScanTreeRow::Root { path, .. } => Some(path.clone()),
+            ScanTreeRow::Project { root, .. } | ScanTreeRow::Dependency { root, .. } => {
+                Some(root.clone())
+            }
+        }
     }
 
     fn review_message(&self) -> String {
@@ -902,12 +1266,6 @@ impl App {
 
     fn visible_indices(&self) -> Vec<usize> {
         matching_indices(&self.scan.folders, &self.filter)
-    }
-
-    fn current_folder(&self) -> Option<&DependencyFolder> {
-        let visible = self.visible_indices();
-        let folder_idx = visible.get(self.cursor)?;
-        self.scan.folders.get(*folder_idx)
     }
 
     fn clamp_cursor(&mut self) {
@@ -976,13 +1334,19 @@ fn expand_home(raw: &str) -> String {
     raw.to_string()
 }
 
+fn toggle_path(paths: &mut HashSet<PathBuf>, path: PathBuf) {
+    if !paths.insert(path.clone()) {
+        paths.remove(&path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
-    use super::{App, savings_meter_columns};
+    use super::{App, Tab, savings_meter_columns};
     use crate::age::AgeThreshold;
     use crate::scanner::{DependencyFolder, DependencyKind, ScanSummary};
 
@@ -1106,6 +1470,85 @@ mod tests {
 
         assert_eq!(app.roots.len(), 1);
         assert!(app.message.contains("keep at least one"));
+    }
+
+    #[test]
+    fn escape_from_review_returns_to_folders() {
+        let mut app = app();
+        app.tab = Tab::Review;
+
+        let quits = app.back();
+
+        assert!(!quits);
+        assert_eq!(app.tab, Tab::Folders);
+    }
+
+    #[test]
+    fn escape_from_help_returns_to_previous_view() {
+        let mut app = app();
+        app.previous_tab = Tab::Scan;
+        app.tab = Tab::Help;
+
+        let quits = app.back();
+
+        assert!(!quits);
+        assert_eq!(app.tab, Tab::Scan);
+    }
+
+    #[test]
+    fn escape_from_scan_requests_quit() {
+        let mut app = app();
+        app.tab = Tab::Scan;
+
+        assert!(app.back());
+    }
+
+    #[test]
+    fn enter_on_scan_root_expands_and_collapses() {
+        let mut app = app();
+        app.tab = Tab::Scan;
+        app.root_cursor = 0;
+        let root = app.roots[0].clone();
+
+        app.activate_scan_row();
+
+        assert!(!app.expanded_roots.contains(&root));
+
+        app.activate_scan_row();
+
+        assert!(app.expanded_roots.contains(&root));
+    }
+
+    #[test]
+    fn folders_enter_requires_selection_before_review() {
+        let mut app = app();
+        app.tab = Tab::Folders;
+        app.selected.clear();
+
+        app.activate_current();
+
+        assert_eq!(app.tab, Tab::Folders);
+        assert!(app.message.contains("select at least one"));
+    }
+
+    #[test]
+    fn review_rows_come_from_selected_folders() {
+        let mut app = app();
+        app.selected.clear();
+        app.selected
+            .insert(PathBuf::from("/tmp/ready/node_modules"));
+
+        let selected = app.selected_folder_indices();
+
+        assert_eq!(selected, vec![0]);
+    }
+
+    #[test]
+    fn scan_tree_groups_by_root_and_project() {
+        let app = app();
+        let rows = app.scan_tree_rows();
+
+        assert!(rows.len() >= 3);
     }
 
     #[test]
