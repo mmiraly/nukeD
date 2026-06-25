@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use crate::age::AgeThreshold;
 use crate::cleanup::Cleaner;
-use crate::display::{age_label, bytes, percent, status_label};
+use crate::display::{age_label, bytes, dotted_bar, percent, status_label};
 use crate::fuzzy::matching_indices;
 use crate::scanner::{DependencyFolder, ScanSummary};
 
@@ -48,13 +48,15 @@ struct App {
 struct Theme;
 
 impl Theme {
-    const BORDER: Color = Color::Rgb(91, 121, 102);
-    const CYAN: Color = Color::Rgb(111, 214, 210);
-    const GREEN: Color = Color::Rgb(139, 205, 135);
-    const AMBER: Color = Color::Rgb(216, 174, 108);
-    const MUTED: Color = Color::Rgb(101, 108, 116);
-    const TEXT: Color = Color::Rgb(214, 220, 222);
-    const DARK: Color = Color::Rgb(32, 38, 42);
+    const RED: Color = Color::Rgb(214, 59, 63);
+    const GREEN: Color = Color::Rgb(95, 196, 107);
+    const YELLOW: Color = Color::Rgb(236, 199, 78);
+    const BLUE: Color = Color::Rgb(77, 131, 217);
+    const MAGENTA: Color = Color::Rgb(189, 71, 120);
+    const CYAN: Color = Color::Rgb(89, 194, 207);
+    const TEXT: Color = Color::Rgb(214, 208, 197);
+    const DARK: Color = Color::Rgb(57, 59, 66);
+    const BORDER: Color = Color::Rgb(95, 196, 107);
 }
 
 fn metric_style() -> Style {
@@ -66,23 +68,25 @@ fn tui_bar(value: u64, max: u64, width: usize) -> Span<'static> {
         return Span::raw("");
     }
 
-    if max == 0 {
-        return Span::styled("░".repeat(width), Style::default().fg(Theme::DARK));
-    }
-
-    let filled = ((value as f64 / max as f64) * width as f64).round() as usize;
-    let filled = filled.min(width);
-    let empty = width.saturating_sub(filled);
-    let color = if filled > (width * 2 / 3) {
-        Theme::GREEN
-    } else if filled > (width / 3) {
-        Theme::CYAN
+    let ratio = if max == 0 {
+        0.0
     } else {
-        Theme::AMBER
+        value as f64 / max as f64
+    };
+    let color = if ratio >= 0.85 {
+        Theme::GREEN
+    } else if ratio >= 0.55 {
+        Theme::CYAN
+    } else if ratio >= 0.25 {
+        Theme::BLUE
+    } else if ratio > 0.0 {
+        Theme::YELLOW
+    } else {
+        Theme::DARK
     };
 
     Span::styled(
-        format!("{}{}", "█".repeat(filled), "░".repeat(empty)),
+        dotted_bar(value, max, width, ':', '.'),
         Style::default().fg(color),
     )
 }
@@ -266,7 +270,7 @@ impl App {
                     format!("manual {}", selected_newer),
                     if selected_newer > 0 {
                         Style::default()
-                            .fg(Theme::AMBER)
+                            .fg(Theme::MAGENTA)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         metric_style()
@@ -274,7 +278,7 @@ impl App {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("filter ", Style::default().fg(Theme::MUTED)),
+                Span::styled("filter ", Style::default().fg(Theme::DARK)),
                 Span::styled(
                     if self.filter.is_empty() {
                         "none".to_string()
@@ -283,13 +287,13 @@ impl App {
                     },
                     if self.mode == Mode::Search {
                         Style::default()
-                            .fg(Theme::AMBER)
+                            .fg(Theme::YELLOW)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Theme::TEXT)
                     },
                 ),
-                Span::styled("  total ", Style::default().fg(Theme::MUTED)),
+                Span::styled("  total ", Style::default().fg(Theme::DARK)),
                 Span::styled(bytes(visible_total), metric_style()),
             ]),
         ];
@@ -298,10 +302,10 @@ impl App {
             let total = self.total_for_visible(Some(*preset));
             let style = if *preset == self.threshold {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(Theme::CYAN)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(Theme::DARK)
             };
             lines.push(Line::from(vec![
                 Span::styled(format!("{}:{:>4} ", idx + 1, preset), style),
@@ -369,7 +373,7 @@ impl App {
         } else if is_eligible {
             Style::default().fg(Theme::TEXT)
         } else {
-            Style::default().fg(Theme::MUTED)
+            Style::default().fg(Theme::DARK)
         };
 
         Row::new(vec![
@@ -488,7 +492,7 @@ impl App {
 
     fn footer_style(&self) -> Style {
         if self.selected_newer_count() > 0 || self.message.contains("warning") {
-            Style::default().fg(Theme::AMBER)
+            Style::default().fg(Theme::RED)
         } else {
             Style::default().fg(Theme::TEXT)
         }

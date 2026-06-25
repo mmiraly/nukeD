@@ -42,13 +42,7 @@ pub fn print_report(scan: &ScanSummary, threshold: AgeThreshold, filter: Option<
         } else {
             scan.total_for(preset)
         };
-        println!(
-            "  {:>4}  {:>12}  {:>5}  {}",
-            preset,
-            bytes(total),
-            percent(total, chart_max),
-            bar(total, chart_max, 24)
-        );
+        println!("{}", chart_row(&preset.label(), total, chart_max, 24));
     }
     println!();
 
@@ -126,17 +120,21 @@ pub fn status_label(is_eligible: bool) -> &'static str {
 }
 
 pub fn bar(value: u64, max: u64, width: usize) -> String {
+    dotted_bar(value, max, width, ':', '.')
+}
+
+pub fn dotted_bar(value: u64, max: u64, width: usize, fill: char, empty: char) -> String {
     if width == 0 {
         return String::new();
     }
     if max == 0 {
-        return " ".repeat(width);
+        return empty.to_string().repeat(width);
     }
     let filled = ((value as f64 / max as f64) * width as f64).round() as usize;
     format!(
         "{}{}",
-        "█".repeat(filled.min(width)),
-        "░".repeat(width.saturating_sub(filled))
+        fill.to_string().repeat(filled.min(width)),
+        empty.to_string().repeat(width.saturating_sub(filled))
     )
 }
 
@@ -147,20 +145,48 @@ pub fn percent(value: u64, max: u64) -> String {
     format!("{:.0}%", (value as f64 / max as f64) * 100.0)
 }
 
+pub fn chart_row(label: &str, value: u64, max: u64, width: usize) -> String {
+    format!(
+        "  {:>4}  {:>12}  {:>5}  {}",
+        label,
+        bytes(value),
+        percent(value, max),
+        bar(value, max, width)
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bar, percent};
+    use super::{bar, chart_row, percent};
 
     #[test]
     fn bars_keep_fixed_width() {
         assert_eq!(bar(0, 100, 12).chars().count(), 12);
         assert_eq!(bar(50, 100, 12).chars().count(), 12);
         assert_eq!(bar(100, 100, 12).chars().count(), 12);
+        assert_eq!(bar(0, 100, 12), "............");
+        assert_eq!(bar(100, 100, 12), "::::::::::::");
     }
 
     #[test]
     fn percent_handles_empty_totals() {
         assert_eq!(percent(0, 0), "0%");
         assert_eq!(percent(25, 100), "25%");
+    }
+
+    #[test]
+    fn chart_rows_keep_bar_column_stable() {
+        let rows = [
+            chart_row("7d", 100, 100, 24),
+            chart_row("30d", 50, 100, 24),
+            chart_row("90d", 0, 100, 24),
+            chart_row("1y", 0, 100, 24),
+        ];
+        let columns: Vec<usize> = rows
+            .iter()
+            .map(|row| row.find(':').or_else(|| row.find('.')).unwrap())
+            .collect();
+
+        assert!(columns.windows(2).all(|pair| pair[0] == pair[1]));
     }
 }
