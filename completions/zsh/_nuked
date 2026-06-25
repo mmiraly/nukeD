@@ -1,0 +1,11 @@
+#compdef nuked
+
+_nuked() {
+    _arguments -C \
+        '(-r --root)'{-r,--root}'[Root directory to scan]:path:_files -/' \
+        '(-o --older-than)'{-o,--older-than}'[Only select dependency folders older than this age]:age:(7d 30d 90d 1y)' \
+        '--dry-run[Print a report without launching the TUI or deleting anything]' \
+        '(-f --filter)'{-f,--filter}'[Fuzzy-filter results by path, kind, size, or age]:query:' \
+        '(-h --help)'{-h,--help}'[Print help]' \
+        '(-V --version)'{-V,--version}'[Print version]'
+}
