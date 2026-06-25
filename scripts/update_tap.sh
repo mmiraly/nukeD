@@ -12,6 +12,11 @@ if [ -z "$TAG" ]; then
     exit 1
 fi
 
+if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required."
+    exit 1
+fi
+
 TEMP_DIR="$(mktemp -d)"
 cleanup() {
     rm -rf "$TEMP_DIR"
@@ -24,7 +29,13 @@ download_and_sha() {
     local url="${REPO_URL}/releases/download/${TAG}/${filename}"
     local output="${TEMP_DIR}/${filename}"
 
-    curl -fL "$url" -o "$output" >/dev/null 2>&1
+    if ! curl -fL "$url" -o "$output" >/dev/null 2>&1; then
+        echo "Missing release asset: ${filename}" >&2
+        echo "Expected URL: ${url}" >&2
+        echo "Run scripts/release.sh ${TAG} and scripts/release_linux.sh ${TAG} first." >&2
+        exit 1
+    fi
+
     shasum -a 256 "$output" | awk '{print $1}'
 }
 
@@ -78,7 +89,7 @@ EOF
     if git diff --staged --quiet; then
         echo "No tap changes."
     else
-        git commit -m "add nuked formula"
+        git commit -m "update nuked to ${TAG}"
         git push origin main
     fi
 )
