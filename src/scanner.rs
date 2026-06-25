@@ -195,9 +195,15 @@ fn is_project_for_kind(project_path: &Path, kind: DependencyKind) -> bool {
                 || has_file(project_path, "setup.cfg")
                 || has_file(project_path, "Pipfile")
                 || has_file(project_path, "poetry.lock")
-                || has_requirement_signal(project_path)
+                || (has_requirement_signal(project_path) && has_python_env_signal(project_path))
         }
     }
+}
+
+fn has_python_env_signal(project_path: &Path) -> bool {
+    [".venv", "venv", ".env", "env", "virtualenv", ".virtualenv"]
+        .iter()
+        .any(|name| project_path.join(name).join("pyvenv.cfg").is_file())
 }
 
 fn has_requirement_signal(project_path: &Path) -> bool {
@@ -222,17 +228,44 @@ fn looks_like_requirements_file(path: &Path) -> bool {
         return false;
     };
 
-    content.lines().take(60).any(|line| {
-        let line = line.trim();
-        !line.is_empty()
-            && !line.starts_with('#')
-            && (line.contains("==")
-                || line.contains(">=")
-                || line.contains("<=")
-                || line.starts_with("-r ")
-                || line.starts_with("--index-url")
-                || line.starts_with("git+"))
-    })
+    content
+        .lines()
+        .take(60)
+        .any(|line| looks_like_requirement_line(line.trim()))
+}
+
+fn looks_like_requirement_line(line: &str) -> bool {
+    if line.is_empty() || line.starts_with('#') {
+        return false;
+    }
+
+    if line.contains("==")
+        || line.contains(">=")
+        || line.contains("<=")
+        || line.contains("~=")
+        || line.contains("!=")
+        || line.starts_with("-r ")
+        || line.starts_with("--index-url")
+        || line.starts_with("--extra-index-url")
+        || line.starts_with("git+")
+    {
+        return true;
+    }
+
+    let package = line
+        .split_once(';')
+        .map_or(line, |(package, _)| package)
+        .split_once('[')
+        .map_or(line, |(package, _)| package)
+        .trim();
+
+    !package.is_empty()
+        && package.len() <= 80
+        && package
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+        && package.chars().any(|ch| ch.is_ascii_alphabetic())
+        && !package.contains("..")
 }
 
 fn has_file(dir: &Path, file: &str) -> bool {
@@ -251,7 +284,7 @@ fn dir_size(path: &Path) -> u64 {
 }
 
 fn latest_project_mtime(project_path: &Path, dependency_path: &Path) -> Option<SystemTime> {
-    let mut latest = fs_mtime(project_path);
+    let mut latest: Option<SystemTime> = None;
     let mut walker = WalkDir::new(project_path).follow_links(false).into_iter();
 
     while let Some(entry) = walker.next() {
@@ -265,11 +298,18 @@ fn latest_project_mtime(project_path: &Path, dependency_path: &Path) -> Option<S
             continue;
         }
 
-        if entry.file_type().is_dir()
-            && entry.path() != project_path
-            && dependency_kind(entry.path()).is_some()
-        {
-            walker.skip_current_dir();
+        if entry.path() != project_path {
+            if entry.file_type().is_dir() && is_project_activity_noise_dir(entry.path()) {
+                walker.skip_current_dir();
+                continue;
+            }
+
+            if is_project_activity_noise_file(entry.path()) {
+                continue;
+            }
+        }
+
+        if entry.file_type().is_dir() {
             continue;
         }
 
@@ -285,6 +325,43 @@ fn fs_mtime(path: &Path) -> Option<SystemTime> {
     fs::symlink_metadata(path).ok()?.modified().ok()
 }
 
+fn is_project_activity_noise_dir(path: &Path) -> bool {
+    dependency_kind(path).is_some()
+        || matches!(
+            path.file_name()
+                .map(|name| name.to_string_lossy())
+                .as_deref(),
+            Some(
+                ".git"
+                    | ".hg"
+                    | ".svn"
+                    | "target"
+                    | "dist"
+                    | "build"
+                    | ".cache"
+                    | ".next"
+                    | ".nuxt"
+                    | ".vite"
+                    | ".turbo"
+                    | ".parcel-cache"
+                    | ".pytest_cache"
+                    | "__pycache__"
+                    | ".mypy_cache"
+                    | ".ruff_cache"
+                    | ".tox"
+            )
+        )
+}
+
+fn is_project_activity_noise_file(path: &Path) -> bool {
+    matches!(
+        path.file_name()
+            .map(|name| name.to_string_lossy())
+            .as_deref(),
+        Some(".DS_Store" | "Thumbs.db" | ".eslintcache")
+    )
+}
+
 fn is_hidden_noise(entry: &DirEntry) -> bool {
     matches!(
         entry.file_name().to_string_lossy().as_ref(),
@@ -297,6 +374,7 @@ mod tests {
     use std::fs;
     use std::time::{Duration, SystemTime};
 
+    use filetime::{FileTime, set_file_mtime};
     use tempfile::TempDir;
 
     use super::{DependencyKind, ScanOptions, scan_roots};
@@ -328,8 +406,28 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("py");
         fs::create_dir_all(project.join(".venv/lib")).unwrap();
+        fs::write(project.join(".venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
         fs::write(project.join("deps.txt"), "requests==2.0\n").unwrap();
         fs::write(project.join(".venv/lib/site.py"), "x").unwrap();
+
+        let scan = scan_roots(&[tmp.path().to_path_buf()], ScanOptions::default()).unwrap();
+
+        assert_eq!(scan.folders.len(), 1);
+        assert_eq!(scan.folders[0].kind, DependencyKind::Python);
+    }
+
+    #[test]
+    fn detects_python_env_with_bare_requirement_lines() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("bot");
+        fs::create_dir_all(project.join("env/lib")).unwrap();
+        fs::write(project.join("env/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        fs::write(
+            project.join("requirements.txt"),
+            "discord.py\npython-dotenv\naiohttp\n",
+        )
+        .unwrap();
+        fs::write(project.join("env/lib/site.py"), "x").unwrap();
 
         let scan = scan_roots(&[tmp.path().to_path_buf()], ScanOptions::default()).unwrap();
 
@@ -358,6 +456,31 @@ mod tests {
         fs::write(project.join("node_modules/pkg/new.js"), "x").unwrap();
 
         let now = SystemTime::now() + Duration::from_secs(31 * 24 * 60 * 60);
+        let scan = scan_roots(&[tmp.path().to_path_buf()], ScanOptions { now }).unwrap();
+
+        assert!(scan.folders[0].is_older_than(AgeThreshold::days(30)));
+    }
+
+    #[test]
+    fn project_age_ignores_os_noise_and_generated_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("app");
+        fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(project.join("dist")).unwrap();
+        fs::write(project.join("package.json"), "{}").unwrap();
+        fs::write(project.join("src.js"), "source").unwrap();
+        fs::write(project.join("node_modules/pkg/index.js"), "x").unwrap();
+        fs::write(project.join(".DS_Store"), "fresh noise").unwrap();
+        fs::write(project.join("dist/bundle.js"), "fresh build").unwrap();
+
+        let old = FileTime::from_unix_time(1_700_000_000, 0);
+        let fresh = FileTime::from_unix_time(1_800_000_000, 0);
+        set_file_mtime(project.join("package.json"), old).unwrap();
+        set_file_mtime(project.join("src.js"), old).unwrap();
+        set_file_mtime(project.join(".DS_Store"), fresh).unwrap();
+        set_file_mtime(project.join("dist/bundle.js"), fresh).unwrap();
+
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 31 * 86_400);
         let scan = scan_roots(&[tmp.path().to_path_buf()], ScanOptions { now }).unwrap();
 
         assert!(scan.folders[0].is_older_than(AgeThreshold::days(30)));

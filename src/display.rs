@@ -8,28 +8,45 @@ use crate::scanner::{DependencyKind, ScanSummary};
 
 pub fn print_report(scan: &ScanSummary, threshold: AgeThreshold, filter: Option<&str>) {
     let indices = matching_indices(&scan.folders, filter.unwrap_or_default());
+    let filtered = filter.is_some_and(|filter| !filter.trim().is_empty());
+    let eligible_count = indices
+        .iter()
+        .filter(|idx| scan.folders[**idx].is_older_than(threshold))
+        .count();
+    let matching_size = total_size_for_indices(scan, &indices);
     println!("nukeD scan");
     println!("roots: {}", scan.roots.len());
-    println!("dependency folders: {}", scan.folders.len());
+    println!("detected folders: {}", scan.folders.len());
     if let Some(filter) = filter.filter(|filter| !filter.trim().is_empty()) {
         println!("filter: {filter}");
         println!("matching folders: {}", indices.len());
+        println!("matching dependency size: {}", bytes(matching_size));
     }
+    println!("eligible at {threshold}: {eligible_count}");
     println!("total dependency size: {}", bytes(scan.total_size()));
     println!(
-        "reclaimable at {threshold}: {}",
+        "eligible reclaimable: {}",
         bytes(total_for_indices(scan, &indices, threshold))
     );
     println!();
 
-    println!("age presets");
+    println!("age presets     reclaimable");
+    let chart_max = if filtered {
+        matching_size
+    } else {
+        scan.total_size()
+    };
     for preset in AgeThreshold::presets() {
-        let total = scan.total_for(preset);
+        let total = if filtered {
+            total_for_indices(scan, &indices, preset)
+        } else {
+            scan.total_for(preset)
+        };
         println!(
-            "  {:>4}  {:>10}  {}",
+            "  {:>4}  {:>12}  {}",
             preset,
             bytes(total),
-            bar(total, scan.total_size(), 24)
+            bar(total, chart_max, 24)
         );
     }
     println!();
@@ -39,6 +56,9 @@ pub fn print_report(scan: &ScanSummary, threshold: AgeThreshold, filter: Option<
         let total: u64 = scan
             .folders
             .iter()
+            .enumerate()
+            .filter(|(idx, _)| !filtered || indices.contains(idx))
+            .map(|(_, folder)| folder)
             .filter(|folder| folder.kind == kind)
             .map(|folder| folder.size_bytes)
             .sum();
@@ -46,16 +66,18 @@ pub fn print_report(scan: &ScanSummary, threshold: AgeThreshold, filter: Option<
     }
     println!();
 
+    println!(
+        "{:<7} {:>12} {:>8} {:<6} {:>10}  path",
+        "kind", "size", "age", "status", "touched"
+    );
     for idx in indices {
         let folder = &scan.folders[idx];
-        if !folder.is_older_than(threshold) {
-            continue;
-        }
         println!(
-            "{}  {:>10}  {:>6} old  touched {}  {}",
+            "{:<7} {:>12} {:>8} {:<6} {:>10}  {}",
             folder.kind.label(),
             bytes(folder.size_bytes),
             age_label(folder.age),
+            status_label(folder.is_older_than(threshold)),
             modified_label(folder.project_modified),
             folder.path.display()
         );
@@ -68,6 +90,13 @@ fn total_for_indices(scan: &ScanSummary, indices: &[usize], threshold: AgeThresh
         .map(|idx| &scan.folders[*idx])
         .filter(|folder| folder.is_older_than(threshold))
         .map(|folder| folder.size_bytes)
+        .sum()
+}
+
+fn total_size_for_indices(scan: &ScanSummary, indices: &[usize]) -> u64 {
+    indices
+        .iter()
+        .map(|idx| scan.folders[*idx].size_bytes)
         .sum()
 }
 
@@ -89,6 +118,10 @@ pub fn modified_label(time: SystemTime) -> String {
         Ok(age) => format!("{} ago", age_label(age)),
         Err(_) => "in future".to_string(),
     }
+}
+
+pub fn status_label(is_eligible: bool) -> &'static str {
+    if is_eligible { "ready" } else { "newer" }
 }
 
 pub fn bar(value: u64, max: u64, width: usize) -> String {

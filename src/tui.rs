@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use crate::age::AgeThreshold;
 use crate::cleanup::Cleaner;
-use crate::display::{age_label, bar, bytes};
+use crate::display::{age_label, bar, bytes, status_label};
 use crate::fuzzy::matching_indices;
 use crate::scanner::{DependencyFolder, ScanSummary};
 
@@ -183,17 +183,24 @@ impl App {
     fn summary_widget(&self) -> Paragraph<'_> {
         let selected_bytes = self.selected_bytes();
         let visible = self.visible_indices();
+        let visible_total = self.total_for_visible(None);
+        let eligible_visible = visible
+            .iter()
+            .filter(|idx| self.scan.folders[**idx].is_older_than(self.threshold))
+            .count();
         let mut lines = vec![
             Line::from(vec![
                 Span::styled("nukeD", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw("  "),
                 Span::raw(format!("folders: {}", self.scan.folders.len())),
                 Span::raw("  "),
-                Span::raw(format!("total: {}", bytes(self.scan.total_size()))),
+                Span::raw(format!("visible total: {}", bytes(visible_total))),
                 Span::raw("  "),
                 Span::raw(format!("selected: {}", bytes(selected_bytes))),
                 Span::raw("  "),
                 Span::raw(format!("visible: {}", visible.len())),
+                Span::raw("  "),
+                Span::raw(format!("ready: {}", eligible_visible)),
             ]),
             Line::from(vec![
                 Span::raw("filter: "),
@@ -215,18 +222,18 @@ impl App {
         ];
 
         for (idx, preset) in AgeThreshold::presets().iter().enumerate() {
-            let total = self.scan.total_for(*preset);
+            let total = self.total_for_visible(Some(*preset));
             let style = if *preset == self.threshold {
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
+                Style::default().fg(Color::DarkGray)
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("{}:{} ", idx + 1, preset), style),
-                Span::raw(format!("{:>10} ", bytes(total))),
-                Span::raw(bar(total, self.scan.total_size(), 32)),
+                Span::styled(format!("{}:{:>4} ", idx + 1, preset), style),
+                Span::styled(format!("{:>12} ", bytes(total)), style),
+                Span::raw(bar(total, visible_total, 32)),
             ]));
         }
 
@@ -245,15 +252,19 @@ impl App {
             [
                 Constraint::Length(3),
                 Constraint::Length(8),
-                Constraint::Length(10),
+                Constraint::Length(12),
                 Constraint::Length(8),
+                Constraint::Length(7),
                 Constraint::Percentage(30),
                 Constraint::Percentage(50),
             ],
         )
         .header(
-            Row::new(["", "kind", "size", "age", "project", "dependency"])
-                .style(Style::default().add_modifier(Modifier::BOLD)),
+            Row::new(["", "kind", "size", "age", "status", "project", "dependency"]).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
         )
         .block(
             Block::default()
@@ -268,9 +279,24 @@ impl App {
         } else {
             "[ ]"
         };
-        let style = if row_idx == self.cursor {
-            Style::default().bg(Color::DarkGray)
-        } else if folder.is_older_than(self.threshold) {
+        let is_current = row_idx == self.cursor;
+        let is_selected = self.selected.contains(&folder.path);
+        let is_eligible = folder.is_older_than(self.threshold);
+        let style = if is_current && is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_current {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else if is_selected {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_eligible {
             Style::default().fg(Color::White)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -281,6 +307,7 @@ impl App {
             Cell::from(folder.kind.label()),
             Cell::from(bytes(folder.size_bytes)),
             Cell::from(age_label(folder.age)),
+            Cell::from(status_label(is_eligible)),
             Cell::from(folder.project_path.display().to_string()),
             Cell::from(folder.path.display().to_string()),
         ])
@@ -302,7 +329,11 @@ impl App {
             return;
         };
         if !folder.is_older_than(self.threshold) {
-            self.message = format!("{} is newer than {}", folder.path.display(), self.threshold);
+            self.message = format!(
+                "disabled: {} is newer than {}. change age preset to select it",
+                folder.path.display(),
+                self.threshold
+            );
             return;
         }
         let path = folder.path.clone();
@@ -335,6 +366,15 @@ impl App {
             .folders
             .iter()
             .filter(|folder| self.selected.contains(&folder.path))
+            .map(|folder| folder.size_bytes)
+            .sum()
+    }
+
+    fn total_for_visible(&self, threshold: Option<AgeThreshold>) -> u64 {
+        self.visible_indices()
+            .into_iter()
+            .map(|idx| &self.scan.folders[idx])
+            .filter(|folder| threshold.is_none_or(|threshold| folder.is_older_than(threshold)))
             .map(|folder| folder.size_bytes)
             .sum()
     }
