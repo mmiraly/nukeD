@@ -15,7 +15,28 @@ use crate::cleanup::TrashCleaner;
 use crate::scanner::{ScanOptions, scan_roots};
 
 #[derive(Debug, Parser)]
-#[command(author, version, about)]
+#[command(
+    author,
+    version,
+    about,
+    after_help = "Examples:
+  nuked
+      Launch the interactive TUI in the current directory.
+
+  nuked --root ~/Documents/Repos
+      Launch the TUI and scan a specific repo folder.
+
+  nuked --root ~/Documents/Repos --root ~/Code --dry-run
+      Scan multiple roots and print a report without opening the TUI.
+
+  nuked --root ~/Documents/Repos --dry-run --older-than 7d
+      Print folders whose projects have been untouched for at least 7 days.
+
+  nuked --root ~/Documents/Repos --dry-run --filter api
+      Fuzzy-filter the report by path, ecosystem, size, or age.
+
+AGE accepts values like 7d, 2w, 30d, 3m, or 1y."
+)]
 struct Args {
     /// Root directory to scan. Can be passed multiple times.
     #[arg(short, long, value_name = "PATH")]
