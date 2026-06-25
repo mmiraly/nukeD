@@ -11,10 +11,10 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs};
 
 use crate::age::AgeThreshold;
 use crate::cleanup::Cleaner;
@@ -50,6 +50,7 @@ struct App {
     previous_tab: Tab,
     message: String,
     scan_status: ScanStatus,
+    toast: Option<Toast>,
     tick: usize,
 }
 
@@ -139,7 +140,13 @@ enum Mode {
     Browse,
     Search,
     RootInput,
-    Done,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Toast {
+    message: String,
+    tick: usize,
+    is_error: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +240,7 @@ impl App {
             message: "r scan  tab switch  space select  / search  enter review  ? help  q quit"
                 .to_string(),
             scan_status: ScanStatus::Idle,
+            toast: None,
             tick: 0,
         }
     }
@@ -245,17 +253,6 @@ impl App {
         loop {
             terminal.draw(|frame| self.draw(frame))?;
             self.tick = self.tick.wrapping_add(1);
-
-            if self.mode == Mode::Done {
-                if event::poll(Duration::from_millis(250))? {
-                    if let Event::Key(key) = event::read()? {
-                        if key.kind == KeyEventKind::Press {
-                            break;
-                        }
-                    }
-                }
-                continue;
-            }
 
             if !event::poll(Duration::from_millis(250))? {
                 continue;
@@ -341,7 +338,6 @@ impl App {
                     }
                     _ => {}
                 },
-                Mode::Done => {}
             }
         }
 
@@ -384,6 +380,32 @@ impl App {
             .block(Self::panel_block("keys")),
             layout[3],
         );
+
+        if let Some(toast) = self.visible_toast() {
+            let area = toast_area(area);
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        if toast.is_error {
+                            "cleanup failed "
+                        } else {
+                            "cleanup "
+                        },
+                        Style::default()
+                            .fg(if toast.is_error {
+                                Theme::RED
+                            } else {
+                                Theme::MINT
+                            })
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(toast.message.as_str(), Style::default().fg(Theme::TEXT)),
+                ]))
+                .block(Self::panel_block("status")),
+                area,
+            );
+        }
     }
 
     fn tabs_widget(&self) -> Tabs<'static> {
@@ -1234,6 +1256,12 @@ impl App {
         }
     }
 
+    fn visible_toast(&self) -> Option<&Toast> {
+        self.toast
+            .as_ref()
+            .filter(|toast| self.tick.saturating_sub(toast.tick) < 20)
+    }
+
     fn spinner(&self) -> &'static str {
         match self.tick % 4 {
             0 => "-",
@@ -1293,16 +1321,31 @@ impl App {
             }
         }
 
-        self.mode = Mode::Done;
-        self.message = if errors.is_empty() {
-            format!("moved {moved} folder(s) to trash. press any key to exit")
+        let is_error = !errors.is_empty();
+        let toast_message = if errors.is_empty() {
+            format!("moved {moved} folder(s) to trash")
         } else {
             format!(
-                "moved {moved}; {} failed. first error: {}. press any key to exit",
+                "moved {moved}; {} failed. first error: {}",
                 errors.len(),
                 errors[0]
             )
         };
+
+        self.selected.clear();
+        self.tab = Tab::Folders;
+        self.mode = Mode::Browse;
+        self.rescan();
+        self.message = if is_error {
+            "cleanup finished with errors; refreshed scan results".to_string()
+        } else {
+            "cleanup complete; refreshed scan results".to_string()
+        };
+        self.toast = Some(Toast {
+            message: toast_message,
+            tick: self.tick,
+            is_error,
+        });
     }
 }
 
@@ -1340,15 +1383,41 @@ fn toggle_path(paths: &mut HashSet<PathBuf>, path: PathBuf) {
     }
 }
 
+fn toast_area(area: Rect) -> Rect {
+    let width = area.width.min(72).max(area.width.min(36));
+    let height = 3;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height + 2);
+    Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::Path;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
+    use anyhow::Result;
+
     use super::{App, Tab, savings_meter_columns};
     use crate::age::AgeThreshold;
+    use crate::cleanup::Cleaner;
     use crate::scanner::{DependencyFolder, DependencyKind, ScanSummary};
+
+    struct RemovingCleaner;
+
+    impl Cleaner for RemovingCleaner {
+        fn trash(&self, path: &Path) -> Result<()> {
+            fs::remove_dir_all(path)?;
+            Ok(())
+        }
+    }
 
     fn folder(name: &str, age_days: u64) -> DependencyFolder {
         let path = PathBuf::from(format!("/tmp/{name}/node_modules"));
@@ -1549,6 +1618,34 @@ mod tests {
         let rows = app.scan_tree_rows();
 
         assert!(rows.len() >= 3);
+    }
+
+    #[test]
+    fn trash_selected_keeps_tui_open_and_refreshes_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("app");
+        let deps = project.join("node_modules");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("package.json"), "{}").unwrap();
+        fs::create_dir(&deps).unwrap();
+
+        let scan = crate::scanner::scan_roots(
+            &[tmp.path().to_path_buf()],
+            crate::scanner::ScanOptions::default(),
+        )
+        .unwrap();
+        let mut app = App::new(scan, AgeThreshold::days(7), String::new());
+        app.tab = Tab::Review;
+        app.selected.insert(deps);
+
+        app.trash_selected(&RemovingCleaner);
+
+        assert_eq!(app.mode, super::Mode::Browse);
+        assert_eq!(app.tab, Tab::Folders);
+        assert!(app.selected.is_empty());
+        assert!(app.scan.folders.is_empty());
+        assert!(app.toast.is_some());
+        assert!(app.message.contains("refreshed"));
     }
 
     #[test]
