@@ -30,7 +30,7 @@ pub fn print_report(scan: &ScanSummary, threshold: AgeThreshold, filter: Option<
     );
     println!();
 
-    println!("age presets     reclaimable");
+    println!("age presets     reclaimable    saved");
     let chart_max = if filtered {
         matching_size
     } else {
@@ -43,9 +43,10 @@ pub fn print_report(scan: &ScanSummary, threshold: AgeThreshold, filter: Option<
             scan.total_for(preset)
         };
         println!(
-            "  {:>4}  {:>12}  {}",
+            "  {:>4}  {:>12}  {:>5}  {}",
             preset,
             bytes(total),
+            percent(total, chart_max),
             bar(total, chart_max, 24)
         );
     }
@@ -137,4 +138,29 @@ pub fn bar(value: u64, max: u64, width: usize) -> String {
         "█".repeat(filled.min(width)),
         "░".repeat(width.saturating_sub(filled))
     )
+}
+
+pub fn percent(value: u64, max: u64) -> String {
+    if max == 0 {
+        return "0%".to_string();
+    }
+    format!("{:.0}%", (value as f64 / max as f64) * 100.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bar, percent};
+
+    #[test]
+    fn bars_keep_fixed_width() {
+        assert_eq!(bar(0, 100, 12).chars().count(), 12);
+        assert_eq!(bar(50, 100, 12).chars().count(), 12);
+        assert_eq!(bar(100, 100, 12).chars().count(), 12);
+    }
+
+    #[test]
+    fn percent_handles_empty_totals() {
+        assert_eq!(percent(0, 0), "0%");
+        assert_eq!(percent(25, 100), "25%");
+    }
 }
