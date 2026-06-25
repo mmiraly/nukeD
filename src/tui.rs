@@ -48,15 +48,14 @@ struct App {
 struct Theme;
 
 impl Theme {
-    const RED: Color = Color::Rgb(214, 59, 63);
-    const GREEN: Color = Color::Rgb(95, 196, 107);
-    const YELLOW: Color = Color::Rgb(236, 199, 78);
-    const BLUE: Color = Color::Rgb(77, 131, 217);
-    const MAGENTA: Color = Color::Rgb(189, 71, 120);
-    const CYAN: Color = Color::Rgb(89, 194, 207);
-    const TEXT: Color = Color::Rgb(214, 208, 197);
-    const DARK: Color = Color::Rgb(57, 59, 66);
-    const BORDER: Color = Color::Rgb(95, 196, 107);
+    const RED: Color = Color::Rgb(190, 92, 86);
+    const GREEN: Color = Color::Rgb(128, 168, 126);
+    const AMBER: Color = Color::Rgb(196, 155, 92);
+    const MINT: Color = Color::Rgb(119, 181, 168);
+    const TEXT: Color = Color::Rgb(210, 211, 204);
+    const MUTED: Color = Color::Rgb(116, 124, 121);
+    const DARK: Color = Color::Rgb(48, 52, 55);
+    const BORDER: Color = Color::Rgb(87, 116, 96);
 }
 
 fn metric_style() -> Style {
@@ -73,21 +72,57 @@ fn tui_bar(value: u64, max: u64, width: usize) -> Span<'static> {
     } else {
         value as f64 / max as f64
     };
-    let color = if ratio >= 0.85 {
+    let color = if ratio >= 0.75 {
         Theme::GREEN
-    } else if ratio >= 0.55 {
-        Theme::CYAN
-    } else if ratio >= 0.25 {
-        Theme::BLUE
     } else if ratio > 0.0 {
-        Theme::YELLOW
+        Theme::MINT
     } else {
-        Theme::DARK
+        Theme::MUTED
     };
 
     Span::styled(
         dotted_bar(value, max, width, ':', '.'),
         Style::default().fg(color),
+    )
+}
+
+fn savings_meter_line(
+    key: usize,
+    label: &str,
+    value: u64,
+    max: u64,
+    is_active: bool,
+) -> Line<'static> {
+    let (preset, value_text, percent_text) = savings_meter_columns(key, label, value, max);
+    let style = if is_active {
+        Style::default()
+            .fg(Theme::MINT)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Theme::MUTED)
+    };
+
+    Line::from(vec![
+        Span::styled(preset, style),
+        Span::raw("    "),
+        Span::styled(value_text, style),
+        Span::raw("    "),
+        Span::styled(percent_text, style),
+        Span::raw("    "),
+        tui_bar(value, max, 32),
+    ])
+}
+
+fn savings_meter_columns(
+    key: usize,
+    label: &str,
+    value: u64,
+    max: u64,
+) -> (String, String, String) {
+    (
+        format!("{key}: {label:<3}"),
+        format!("{:>12}", bytes(value)),
+        format!("{:>4}", percent(value, max)),
     )
 }
 
@@ -221,11 +256,17 @@ impl App {
             ])
             .split(area);
 
-        frame.render_widget(self.summary_widget(), layout[0]);
+        let top = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(64), Constraint::Length(32)])
+            .split(layout[0]);
+
+        frame.render_widget(self.summary_widget(), top[0]);
+        frame.render_widget(self.animation_widget(), top[1]);
         frame.render_widget(self.table_widget(), layout[1]);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(self.spinner(), Style::default().fg(Theme::CYAN)),
+                Span::styled(self.spinner(), Style::default().fg(Theme::MINT)),
                 Span::raw(" "),
                 Span::styled(self.message.as_str(), self.footer_style()),
             ]))
@@ -248,7 +289,7 @@ impl App {
                 Span::styled(
                     "nukeD",
                     Style::default()
-                        .fg(Theme::CYAN)
+                        .fg(Theme::MINT)
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("  "),
@@ -270,7 +311,7 @@ impl App {
                     format!("manual {}", selected_newer),
                     if selected_newer > 0 {
                         Style::default()
-                            .fg(Theme::MAGENTA)
+                            .fg(Theme::AMBER)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         metric_style()
@@ -278,7 +319,7 @@ impl App {
                 ),
             ]),
             Line::from(vec![
-                Span::styled("filter ", Style::default().fg(Theme::DARK)),
+                Span::styled("filter ", Style::default().fg(Theme::MUTED)),
                 Span::styled(
                     if self.filter.is_empty() {
                         "none".to_string()
@@ -287,35 +328,68 @@ impl App {
                     },
                     if self.mode == Mode::Search {
                         Style::default()
-                            .fg(Theme::YELLOW)
+                            .fg(Theme::AMBER)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Theme::TEXT)
                     },
                 ),
-                Span::styled("  total ", Style::default().fg(Theme::DARK)),
+                Span::styled("  total ", Style::default().fg(Theme::MUTED)),
                 Span::styled(bytes(visible_total), metric_style()),
             ]),
         ];
 
         for (idx, preset) in AgeThreshold::presets().iter().enumerate() {
             let total = self.total_for_visible(Some(*preset));
-            let style = if *preset == self.threshold {
-                Style::default()
-                    .fg(Theme::CYAN)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Theme::DARK)
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{}:{:>4} ", idx + 1, preset), style),
-                Span::styled(format!("{:>12} ", bytes(total)), style),
-                Span::styled(format!("{:>5} ", percent(total, visible_total)), style),
-                tui_bar(total, visible_total, 32),
-            ]));
+            lines.push(savings_meter_line(
+                idx + 1,
+                &preset.label(),
+                total,
+                visible_total,
+                *preset == self.threshold,
+            ));
         }
 
         Paragraph::new(lines).block(Self::panel_block("savings"))
+    }
+
+    fn animation_widget(&self) -> Paragraph<'_> {
+        let frames = [
+            ["deps", "  -> scan", "     ...."],
+            ["deps", "  -> mark", "   ..::.."],
+            ["deps", "  -> trash", " ..::::.."],
+            ["saved", "  .. ..", " :::::::: "],
+        ];
+        let frame = frames[(self.tick / 2) % frames.len()];
+        let selected = self.selected.len();
+        let reclaiming = bytes(self.selected_bytes());
+
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled(
+                frame[0],
+                Style::default()
+                    .fg(Theme::MINT)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![Span::styled(
+                frame[1],
+                Style::default().fg(Theme::TEXT),
+            )]),
+            Line::from(vec![Span::styled(
+                frame[2],
+                Style::default().fg(Theme::GREEN),
+            )]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("sel ", Style::default().fg(Theme::MUTED)),
+                Span::styled(selected.to_string(), metric_style()),
+            ]),
+            Line::from(vec![
+                Span::styled("size ", Style::default().fg(Theme::MUTED)),
+                Span::styled(reclaiming, metric_style()),
+            ]),
+        ])
+        .block(Self::panel_block("cycle"))
     }
 
     fn table_widget(&self) -> Table<'_> {
@@ -340,7 +414,7 @@ impl App {
         .header(
             Row::new(["", "kind", "size", "age", "status", "project", "dependency"]).style(
                 Style::default()
-                    .fg(Theme::CYAN)
+                    .fg(Theme::MINT)
                     .add_modifier(Modifier::BOLD),
             ),
         )
@@ -359,7 +433,7 @@ impl App {
         let style = if is_current && is_selected {
             Style::default()
                 .fg(Color::Black)
-                .bg(Theme::CYAN)
+                .bg(Theme::MINT)
                 .add_modifier(Modifier::BOLD)
         } else if is_current {
             Style::default()
@@ -368,12 +442,12 @@ impl App {
                 .add_modifier(Modifier::BOLD)
         } else if is_selected {
             Style::default()
-                .fg(Theme::CYAN)
+                .fg(Theme::MINT)
                 .add_modifier(Modifier::BOLD)
         } else if is_eligible {
             Style::default().fg(Theme::TEXT)
         } else {
-            Style::default().fg(Theme::DARK)
+            Style::default().fg(Theme::MUTED)
         };
 
         Row::new(vec![
@@ -595,7 +669,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 
-    use super::App;
+    use super::{App, savings_meter_columns};
     use crate::age::AgeThreshold;
     use crate::scanner::{DependencyFolder, DependencyKind, ScanSummary};
 
@@ -682,6 +756,26 @@ mod tests {
         assert!(
             app.selected
                 .contains(&PathBuf::from("/tmp/newer/node_modules"))
+        );
+    }
+
+    #[test]
+    fn savings_meter_columns_stay_fixed_width() {
+        let rows = [
+            savings_meter_columns(1, "7d", 581_890_000, 581_890_000),
+            savings_meter_columns(2, "30d", 186_990_000, 581_890_000),
+            savings_meter_columns(3, "90d", 0, 581_890_000),
+            savings_meter_columns(4, "1y", 0, 581_890_000),
+        ];
+
+        assert!(
+            rows.iter()
+                .all(|(preset, _, _)| preset.chars().count() == 6)
+        );
+        assert!(rows.iter().all(|(_, value, _)| value.chars().count() == 12));
+        assert!(
+            rows.iter()
+                .all(|(_, _, percent)| percent.chars().count() == 4)
         );
     }
 }
