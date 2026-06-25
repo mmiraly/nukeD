@@ -57,14 +57,14 @@ struct App {
 struct Theme;
 
 impl Theme {
-    const RED: Color = Color::Rgb(190, 92, 86);
-    const GREEN: Color = Color::Rgb(128, 168, 126);
-    const AMBER: Color = Color::Rgb(196, 155, 92);
-    const MINT: Color = Color::Rgb(119, 181, 168);
-    const TEXT: Color = Color::Rgb(210, 211, 204);
-    const MUTED: Color = Color::Rgb(116, 124, 121);
-    const DARK: Color = Color::Rgb(48, 52, 55);
-    const BORDER: Color = Color::Rgb(87, 116, 96);
+    const RED: Color = Color::Rgb(255, 107, 107);
+    const GREEN: Color = Color::Rgb(125, 222, 146);
+    const AMBER: Color = Color::Rgb(245, 200, 106);
+    const MINT: Color = Color::Rgb(121, 216, 207);
+    const TEXT: Color = Color::Rgb(232, 238, 231);
+    const MUTED: Color = Color::Rgb(111, 125, 118);
+    const DARK: Color = Color::Rgb(18, 43, 38);
+    const BORDER: Color = Color::Rgb(61, 139, 124);
 }
 
 fn metric_style() -> Style {
