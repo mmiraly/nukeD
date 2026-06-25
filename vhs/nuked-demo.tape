@@ -6,56 +6,67 @@ Set Width 1200
 Set Height 760
 Set Padding 18
 Set Framerate 24
-Set TypingSpeed 35ms
-Set Theme "Catppuccin Mocha"
+Set PlaybackSpeed 1.15
+Set TypingSpeed 22ms
+Set Theme {"name":"nukeD High Contrast","background":"#000000","foreground":"#F8F8F2","cursor":"#FFFFFF","selection":"#334155","black":"#000000","red":"#FF5C57","green":"#5AF78E","yellow":"#F3F99D","blue":"#57C7FF","magenta":"#FF6AC1","cyan":"#9AEDFE","white":"#F8F8F2","brightBlack":"#686868","brightRed":"#FF5C57","brightGreen":"#5AF78E","brightYellow":"#F3F99D","brightBlue":"#57C7FF","brightMagenta":"#FF6AC1","brightCyan":"#9AEDFE","brightWhite":"#FFFFFF"}
 
+Hide
 Type "cargo build --quiet"
 Enter
-Sleep 1s
+Sleep 300ms
+
+Type "export PATH=$PWD/target/debug:$PATH"
+Enter
+Sleep 100ms
 
 Type "DEMO_ROOT=$(scripts/demo_fixture.sh)"
 Enter
-Sleep 400ms
+Sleep 200ms
 
-Type "target/debug/nuked --root $DEMO_ROOT --dry-run --older-than 30d"
+Type "clear"
 Enter
-Sleep 3s
+Sleep 200ms
+Show
 
-Type "target/debug/nuked --root $DEMO_ROOT --older-than 30d"
+Type "nuked --root $DEMO_ROOT --dry-run --older-than 30d"
 Enter
-Sleep 1s
+Sleep 2s
+
+Type "nuked --root $DEMO_ROOT --older-than 30d"
+Enter
+Sleep 700ms
 
 Type "1"
-Sleep 700ms
+Sleep 450ms
 Type "r"
-Sleep 1s
+Sleep 700ms
 Type "h"
-Sleep 700ms
-Type "j"
-Sleep 300ms
-Enter
 Sleep 500ms
 Type "j"
-Sleep 300ms
+Sleep 220ms
 Enter
-Sleep 500ms
+Sleep 350ms
+Type "j"
+Sleep 220ms
+Enter
+Sleep 350ms
 Type " "
-Sleep 700ms
+Sleep 450ms
 Type "l"
-Sleep 700ms
+Sleep 500ms
 Type "/"
-Sleep 300ms
+Sleep 220ms
 Type "api"
-Sleep 700ms
+Sleep 500ms
 Enter
-Sleep 600ms
+Sleep 400ms
 Type " "
-Sleep 700ms
+Sleep 450ms
 Enter
-Sleep 900ms
+Sleep 650ms
 Enter
-Sleep 2s
+Sleep 1.4s
 Type "?"
-Sleep 2s
+Sleep 1.4s
 Type "q"
-Sleep 600ms
+Sleep 400ms
