@@ -1,0 +1,22 @@
+# Rust build output
+/target/
+
+# Local archives and release artifacts
+*.tar.gz
+*.tgz
+*.zip
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Rustfmt backups
+**/*.rs.bk
+
+# Local-only notes and scratch files
+docs/RELEASE_GUIDE.md
+tmp/
+scratch/

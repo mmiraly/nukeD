@@ -1,0 +1,25 @@
+[package]
+name = "nuked"
+version = "0.1.0"
+edition = "2024"
+description = "Nuke stale project dependency folders."
+license = "GPL-3.0"
+homepage = "https://github.com/mmiraly/nukeD"
+repository = "https://github.com/mmiraly/nukeD"
+readme = "README.md"
+
+[[bin]]
+name = "nuked"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+humansize = "2"
+ratatui = "0.29"
+trash = "5"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
