@@ -14,6 +14,8 @@ reclaimed, and lets you remove selected folders safely.
 It is built for developer repo folders, not installed applications and not
 package-manager caches.
 
+![nukeD terminal demo](assets/nuked-demo.gif)
+
 ```text
 nukeD scan
 roots: 1
@@ -210,6 +212,13 @@ Useful manual checks:
 cargo run -- --help
 cargo run -- --root ~/Documents/Repos --dry-run --older-than 7d
 cargo run -- --root ~/Documents/Repos --dry-run --filter api
+```
+
+Regenerate the README demo:
+
+```sh
+brew install vhs
+vhs vhs/nuked-demo.tape
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and
