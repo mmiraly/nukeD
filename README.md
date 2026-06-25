@@ -44,14 +44,12 @@ During development, run through Cargo:
 cargo run -- --help
 ```
 
-Homebrew support is planned for the first tagged release:
+Homebrew:
 
 ```sh
 brew tap mmiraly/tap
 brew install nuked
 ```
-
-Until release assets exist, use the source build.
 
 ## Quick Start
 
