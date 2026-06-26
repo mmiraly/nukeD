@@ -8,7 +8,7 @@ Set Padding 18
 Set Framerate 24
 Set PlaybackSpeed 1.15
 Set TypingSpeed 22ms
-Set Theme {"name":"nukeD Dark","background":"#050807","foreground":"#E8EEE7","cursor":"#D8FFE8","selection":"#17352F","black":"#050807","red":"#FF6B6B","green":"#7DDE92","yellow":"#F5C86A","blue":"#62B4FF","magenta":"#E778B2","cyan":"#79D8CF","white":"#D6DED8","brightBlack":"#6F7D76","brightRed":"#FF8A80","brightGreen":"#A8F0B6","brightYellow":"#FFE08A","brightBlue":"#8CCBFF","brightMagenta":"#F59BCB","brightCyan":"#A6F4EA","brightWhite":"#FFFFFF"}
+Set Theme "GruvboxDark"
 
 Hide
 Type "cargo build --quiet"

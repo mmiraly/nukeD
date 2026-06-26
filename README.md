@@ -186,16 +186,6 @@ generated/noisy paths such as `.DS_Store`, `dist`, `build`, `target`, `.cache`,
 - Manual selection is allowed, including newer folders.
 - Review warns when selected folders include newer/manual selections.
 
-## Proposed Features
-
-These are good candidates for future runs:
-
-- Ignore rules with `.nukedignore`.
-- Saved scan profiles for roots and age presets.
-- Machine-readable reports with `--json` or `--report <path>`.
-- A separate package-manager cache mode for npm/pip caches.
-- Restore hints after cleanup, including what moved and where to recover it.
-
 ## Development
 
 Run the checks used before commits:
