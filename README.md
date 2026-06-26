@@ -11,8 +11,7 @@ Nuke stale project dependency folders.
 `node_modules` and Python virtual environments, shows how much space can be
 reclaimed, and lets you remove selected folders safely.
 
-It is built for developer repo folders, not installed applications and not
-package-manager caches.
+It is built for developer repo folders and package-manager cache cleanup.
 
 ![nukeD terminal demo](assets/nuked-demo.gif)
 
@@ -87,6 +86,26 @@ Fuzzy-filter results:
 nuked --root ~/Documents/Repos --dry-run --filter api
 ```
 
+Load a saved profile:
+
+```sh
+nuked --profile work
+```
+
+Write a machine-readable JSON report:
+
+```sh
+nuked --root ~/Documents/Repos --json
+nuked --root ~/Documents/Repos --report nuked-report.json
+```
+
+Inspect package-manager caches instead of project dependencies:
+
+```sh
+nuked --cache --dry-run
+nuked --cache
+```
+
 Age values accept days, weeks, months, or years:
 
 ```sh
@@ -118,6 +137,7 @@ Controls:
 | `tab` / `l` / `→` | Next view |
 | `shift-tab` / `h` / `←` | Previous view |
 | `r` | Rescan current roots |
+| `p` in `scan` | Switch to the next saved profile |
 | `enter` in `scan` | Expand/collapse a root or project |
 | `enter` in `folders` | Review selected folders |
 | `enter` in `review` | Move selected folders to the OS trash |
@@ -151,15 +171,44 @@ Usage: nuked [OPTIONS]
 Options:
   -r, --root <PATH>       Root directory to scan. Can be passed multiple times
   -o, --older-than <AGE>  Only select dependency folders whose project has been untouched for this age
+      --profile <NAME>    Load roots and default age from a saved profile
       --dry-run           Print a report and do not launch the interactive UI or delete anything
+      --json              Print a machine-readable JSON report to stdout
+      --report <PATH>     Write a machine-readable JSON report to disk
+      --cache             Inspect package-manager caches instead of project dependency folders
   -f, --filter <QUERY>    Fuzzy-filter results by path, kind, size, or age text
   -h, --help              Print help
   -V, --version           Print version
 ```
 
-Everything exposed by CLI flags has an equivalent TUI flow except `--dry-run`,
-because the TUI already requires explicit review and confirmation before
-cleanup.
+Everything exposed by CLI flags has an equivalent TUI flow except report-only
+output flags, because the TUI already requires explicit review and confirmation
+before cleanup.
+
+## Profiles
+
+Saved profiles live in the user config directory as `nuked/profiles.toml`.
+Use them to keep named roots and an optional default age preset:
+
+```toml
+[profiles.work]
+roots = ["~/Documents/Repos", "~/Code"]
+older_than = "30d"
+```
+
+Explicit `--root` and `--older-than` values override profile values.
+
+## Ignore Rules
+
+Add `.nukedignore` to a scan root to skip paths before dependency folders are
+discovered. Patterns are relative to that root. Blank lines and `#` comments
+are ignored.
+
+```text
+# Skip generated fixtures
+fixtures
+apps/legacy
+```
 
 ## What It Scans
 
@@ -177,11 +226,15 @@ When calculating project activity, nukeD ignores dependency folders and common
 generated/noisy paths such as `.DS_Store`, `dist`, `build`, `target`, `.cache`,
 `.next`, `.vite`, and Python cache folders.
 
+`--cache` inspects npm and pip cache directories separately from project
+dependency folders.
+
 ## Safety Model
 
 - `--dry-run` never deletes anything.
 - Interactive cleanup only happens after the review step.
 - Cleanup moves folders to the OS trash.
+- After cleanup, nukeD shows what moved and reminds you to restore from the OS trash if needed.
 - If trashing a folder fails, nukeD reports the failure instead of permanently deleting it.
 - Manual selection is allowed, including newer folders.
 - Review warns when selected folders include newer/manual selections.

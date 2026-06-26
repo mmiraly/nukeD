@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::age::AgeThreshold;
@@ -12,6 +13,8 @@ use crate::age::AgeThreshold;
 pub enum DependencyKind {
     Node,
     Python,
+    NpmCache,
+    PipCache,
 }
 
 impl DependencyKind {
@@ -19,6 +22,8 @@ impl DependencyKind {
         match self {
             Self::Node => "node",
             Self::Python => "python",
+            Self::NpmCache => "npm-cache",
+            Self::PipCache => "pip-cache",
         }
     }
 }
@@ -68,12 +73,14 @@ impl ScanSummary {
 #[derive(Debug, Clone, Copy)]
 pub struct ScanOptions {
     pub now: SystemTime,
+    pub use_nukedignore: bool,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
             now: SystemTime::now(),
+            use_nukedignore: true,
         }
     }
 }
@@ -103,6 +110,11 @@ fn scan_root(
     seen: &mut HashSet<PathBuf>,
     folders: &mut Vec<DependencyFolder>,
 ) -> Result<()> {
+    let ignore = if options.use_nukedignore {
+        IgnoreRules::load(root)?
+    } else {
+        IgnoreRules::empty()
+    };
     let mut walker = WalkDir::new(root).follow_links(false).into_iter();
 
     while let Some(entry) = walker.next() {
@@ -112,6 +124,11 @@ fn scan_root(
         };
 
         if !entry.file_type().is_dir() {
+            continue;
+        }
+
+        if entry.path() != root && ignore.is_ignored(root, entry.path()) {
+            walker.skip_current_dir();
             continue;
         }
 
@@ -197,6 +214,7 @@ fn is_project_for_kind(project_path: &Path, kind: DependencyKind) -> bool {
                 || has_file(project_path, "poetry.lock")
                 || (has_requirement_signal(project_path) && has_python_env_signal(project_path))
         }
+        DependencyKind::NpmCache | DependencyKind::PipCache => true,
     }
 }
 
@@ -369,6 +387,65 @@ fn is_hidden_noise(entry: &DirEntry) -> bool {
     )
 }
 
+struct IgnoreRules {
+    set: GlobSet,
+}
+
+impl IgnoreRules {
+    fn empty() -> Self {
+        Self {
+            set: GlobSetBuilder::new()
+                .build()
+                .expect("empty glob set is valid"),
+        }
+    }
+
+    fn load(root: &Path) -> Result<Self> {
+        let path = root.join(".nukedignore");
+        if !path.is_file() {
+            return Ok(Self::empty());
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let mut builder = GlobSetBuilder::new();
+        for line in content.lines() {
+            let pattern = line.trim();
+            if pattern.is_empty() || pattern.starts_with('#') {
+                continue;
+            }
+            let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
+            if pattern.is_empty() {
+                continue;
+            }
+            builder.add(Glob::new(pattern).with_context(|| {
+                format!(
+                    "invalid .nukedignore pattern {pattern:?} in {}",
+                    path.display()
+                )
+            })?);
+            if !pattern.contains('/') {
+                builder.add(Glob::new(&format!("**/{pattern}")).with_context(|| {
+                    format!(
+                        "invalid .nukedignore pattern {pattern:?} in {}",
+                        path.display()
+                    )
+                })?);
+            }
+        }
+
+        Ok(Self {
+            set: builder.build()?,
+        })
+    }
+
+    fn is_ignored(&self, root: &Path, path: &Path) -> bool {
+        path.strip_prefix(root)
+            .ok()
+            .is_some_and(|relative| self.set.is_match(relative))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -456,7 +533,14 @@ mod tests {
         fs::write(project.join("node_modules/pkg/new.js"), "x").unwrap();
 
         let now = SystemTime::now() + Duration::from_secs(31 * 24 * 60 * 60);
-        let scan = scan_roots(&[tmp.path().to_path_buf()], ScanOptions { now }).unwrap();
+        let scan = scan_roots(
+            &[tmp.path().to_path_buf()],
+            ScanOptions {
+                now,
+                ..ScanOptions::default()
+            },
+        )
+        .unwrap();
 
         assert!(scan.folders[0].is_older_than(AgeThreshold::days(30)));
     }
@@ -481,8 +565,49 @@ mod tests {
         set_file_mtime(project.join("dist/bundle.js"), fresh).unwrap();
 
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 31 * 86_400);
-        let scan = scan_roots(&[tmp.path().to_path_buf()], ScanOptions { now }).unwrap();
+        let scan = scan_roots(
+            &[tmp.path().to_path_buf()],
+            ScanOptions {
+                now,
+                ..ScanOptions::default()
+            },
+        )
+        .unwrap();
 
         assert!(scan.folders[0].is_older_than(AgeThreshold::days(30)));
+    }
+
+    #[test]
+    fn nukedignore_skips_dependency_discovery() {
+        let tmp = TempDir::new().unwrap();
+        let ignored = tmp.path().join("ignored");
+        let kept = tmp.path().join("kept");
+        fs::create_dir_all(ignored.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(kept.join("node_modules/pkg")).unwrap();
+        fs::write(ignored.join("package.json"), "{}").unwrap();
+        fs::write(kept.join("package.json"), "{}").unwrap();
+        fs::write(tmp.path().join(".nukedignore"), "ignored/\n").unwrap();
+
+        let scan = scan_roots(&[tmp.path().to_path_buf()], ScanOptions::default()).unwrap();
+
+        assert_eq!(scan.folders.len(), 1);
+        assert_eq!(scan.folders[0].project_path, kept.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn nukedignore_supports_nested_relative_patterns() {
+        let tmp = TempDir::new().unwrap();
+        let ignored = tmp.path().join("apps/api");
+        let kept = tmp.path().join("apps/web");
+        fs::create_dir_all(ignored.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(kept.join("node_modules/pkg")).unwrap();
+        fs::write(ignored.join("package.json"), "{}").unwrap();
+        fs::write(kept.join("package.json"), "{}").unwrap();
+        fs::write(tmp.path().join(".nukedignore"), "apps/api\n").unwrap();
+
+        let scan = scan_roots(&[tmp.path().to_path_buf()], ScanOptions::default()).unwrap();
+
+        assert_eq!(scan.folders.len(), 1);
+        assert_eq!(scan.folders[0].project_path, kept.canonicalize().unwrap());
     }
 }

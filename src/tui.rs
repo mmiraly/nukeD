@@ -17,9 +17,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs};
 
 use crate::age::AgeThreshold;
+use crate::cache::scan_caches;
 use crate::cleanup::Cleaner;
 use crate::display::{age_label, bytes, dotted_bar, percent, status_label};
 use crate::fuzzy::matching_indices;
+use crate::profiles::{Profiles, expand_home};
 use crate::scanner::{DependencyFolder, ScanOptions, ScanSummary, scan_roots};
 
 pub fn run(
@@ -27,9 +29,20 @@ pub fn run(
     threshold: AgeThreshold,
     initial_filter: String,
     cleaner: &dyn Cleaner,
+    profiles: Profiles,
+    active_profile: Option<String>,
+    cache_mode: bool,
 ) -> Result<()> {
     let mut terminal = setup_terminal()?;
-    let result = App::new(scan, threshold, initial_filter).run(&mut terminal, cleaner);
+    let result = App::new(
+        scan,
+        threshold,
+        initial_filter,
+        profiles,
+        active_profile,
+        cache_mode,
+    )
+    .run(&mut terminal, cleaner);
     restore_terminal(&mut terminal)?;
     result
 }
@@ -52,6 +65,9 @@ struct App {
     scan_status: ScanStatus,
     toast: Option<Toast>,
     tick: usize,
+    profiles: Profiles,
+    active_profile: Option<String>,
+    cache_mode: bool,
 }
 
 struct Theme;
@@ -215,7 +231,14 @@ impl Tab {
 }
 
 impl App {
-    fn new(scan: ScanSummary, threshold: AgeThreshold, filter: String) -> Self {
+    fn new(
+        scan: ScanSummary,
+        threshold: AgeThreshold,
+        filter: String,
+        profiles: Profiles,
+        active_profile: Option<String>,
+        cache_mode: bool,
+    ) -> Self {
         let roots = scan.roots.clone();
         let expanded_roots = roots.iter().cloned().collect();
         let selected = scan
@@ -242,6 +265,9 @@ impl App {
             scan_status: ScanStatus::Idle,
             toast: None,
             tick: 0,
+            profiles,
+            active_profile,
+            cache_mode,
         }
     }
 
@@ -281,6 +307,7 @@ impl App {
                         self.message = "tab switch  r scan  q quit".to_string();
                     }
                     KeyCode::Char('r') => self.rescan(),
+                    KeyCode::Char('p') if self.tab == Tab::Scan => self.next_profile(),
                     KeyCode::Char('+') if self.tab == Tab::Scan => {
                         self.mode = Mode::RootInput;
                         self.root_input.clear();
@@ -438,7 +465,11 @@ impl App {
         let mut lines = vec![
             Line::from(vec![
                 Span::styled(
-                    "nukeD",
+                    if self.cache_mode {
+                        "nukeD cache"
+                    } else {
+                        "nukeD"
+                    },
                     Style::default()
                         .fg(Theme::MINT)
                         .add_modifier(Modifier::BOLD),
@@ -489,6 +520,14 @@ impl App {
                 Span::styled(bytes(visible_total), metric_style()),
                 Span::styled("  scan ", Style::default().fg(Theme::MUTED)),
                 self.scan_status_span(),
+                Span::styled("  profile ", Style::default().fg(Theme::MUTED)),
+                Span::styled(
+                    self.active_profile
+                        .as_deref()
+                        .unwrap_or(if self.cache_mode { "cache" } else { "none" })
+                        .to_string(),
+                    metric_style(),
+                ),
             ]),
         ];
 
@@ -662,9 +701,11 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
         )
-        .block(Self::panel_block(
-            "scan tree  enter expand  space select  r rescan  + add  d remove",
-        ))
+        .block(Self::panel_block(if self.cache_mode {
+            "cache mode  space select  enter expand  r refresh"
+        } else {
+            "scan tree  enter expand  space select  r rescan  p profile  + add  d remove"
+        }))
     }
 
     fn review_widget(&self) -> Table<'_> {
@@ -730,7 +771,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )]),
             Line::from("  r rescan                 enter expand/collapse root or project"),
-            Line::from("  + add root               d remove root"),
+            Line::from("  p profile                + add root  d remove root"),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "Folders",
@@ -979,7 +1020,13 @@ impl App {
 
     fn browse_message(&self) -> String {
         match self.tab {
-            Tab::Scan => "r scan  + add root  d remove root  tab switch  / filter  q quit",
+            Tab::Scan => {
+                if self.cache_mode {
+                    "r refresh caches  tab switch  / filter  q quit"
+                } else {
+                    "r scan  p profile  + add root  d remove root  tab switch  / filter  q quit"
+                }
+            }
             Tab::Folders => {
                 "r scan  space select  a ready  A all  / search  enter review  ? help  q quit"
             }
@@ -1004,6 +1051,21 @@ impl App {
     }
 
     fn rescan(&mut self) {
+        if self.cache_mode {
+            let summary = scan_caches();
+            self.scan = summary.to_scan_summary();
+            self.roots = self.scan.roots.clone();
+            self.selected.clear();
+            self.cursor = 0;
+            self.root_cursor = 0;
+            self.scan_status = ScanStatus::Refreshed {
+                tick: self.tick,
+                at: SystemTime::now(),
+            };
+            self.message = format!("refreshed {} cache candidate(s)", self.scan.folders.len());
+            return;
+        }
+
         if self.roots.is_empty() {
             self.message = "add at least one root before scanning".to_string();
             return;
@@ -1031,6 +1093,11 @@ impl App {
     }
 
     fn add_root_from_input(&mut self) {
+        if self.cache_mode {
+            self.message = "cache mode roots are fixed".to_string();
+            return;
+        }
+
         let raw = self.root_input.trim();
         if raw.is_empty() {
             self.message = "root path is empty".to_string();
@@ -1048,6 +1115,11 @@ impl App {
     }
 
     fn remove_current_root(&mut self) {
+        if self.cache_mode {
+            self.message = "cache mode roots are fixed".to_string();
+            return;
+        }
+
         if self.roots.len() <= 1 {
             self.message = "keep at least one scan root".to_string();
             return;
@@ -1070,6 +1142,43 @@ impl App {
                 self.scan.folders.len()
             );
         }
+    }
+
+    fn next_profile(&mut self) {
+        if self.cache_mode {
+            self.message = "cache mode does not use profiles".to_string();
+            return;
+        }
+
+        if self.profiles.is_empty() {
+            self.message = "no saved profiles found".to_string();
+            return;
+        }
+
+        let profiles = self.profiles.all();
+        let current = self
+            .active_profile
+            .as_deref()
+            .and_then(|name| profiles.iter().position(|profile| profile.name == name));
+        let next_idx = current.map_or(0, |idx| (idx + 1) % profiles.len());
+        let profile = profiles[next_idx].clone();
+        if profile.roots.is_empty() {
+            self.message = format!("profile {} has no roots", profile.name);
+            return;
+        }
+
+        self.roots = profile.roots.clone();
+        if let Some(threshold) = profile.older_than {
+            self.threshold = threshold;
+        }
+        self.active_profile = Some(profile.name.clone());
+        self.selected.clear();
+        self.rescan();
+        self.message = format!(
+            "loaded profile {}; scanned {} folder(s)",
+            profile.name,
+            self.scan.folders.len()
+        );
     }
 
     fn selected_bytes(&self) -> u64 {
@@ -1312,21 +1421,27 @@ impl App {
             return;
         }
 
-        let mut moved = 0usize;
+        let mut moved_paths = Vec::new();
         let mut errors = Vec::new();
         for path in selected {
             match cleaner.trash(&path) {
-                Ok(()) => moved += 1,
+                Ok(()) => moved_paths.push(path),
                 Err(err) => errors.push(format!("{}: {err}", path.display())),
             }
         }
 
         let is_error = !errors.is_empty();
+        let moved = moved_paths.len();
+        let restore_hint = if moved == 0 {
+            String::new()
+        } else {
+            " Restore from the OS trash if needed.".to_string()
+        };
         let toast_message = if errors.is_empty() {
-            format!("moved {moved} folder(s) to trash")
+            format!("moved {moved} folder(s) to trash.{restore_hint}")
         } else {
             format!(
-                "moved {moved}; {} failed. first error: {}",
+                "moved {moved}; {} failed. first error: {}.{restore_hint}",
                 errors.len(),
                 errors[0]
             )
@@ -1337,9 +1452,21 @@ impl App {
         self.mode = Mode::Browse;
         self.rescan();
         self.message = if is_error {
-            "cleanup finished with errors; refreshed scan results".to_string()
+            if self.cache_mode {
+                "cleanup finished with errors; restore from OS trash if needed".to_string()
+            } else {
+                "cleanup finished with errors; refreshed scan results; restore from OS trash if needed"
+                    .to_string()
+            }
         } else {
-            "cleanup complete; refreshed scan results".to_string()
+            let refresh = if self.cache_mode {
+                "cache list updated"
+            } else {
+                "refreshed scan results"
+            };
+            format!(
+                "cleanup moved {moved} item(s) to trash; {refresh}; restore from OS trash if needed"
+            )
         };
         self.toast = Some(Toast {
             message: toast_message,
@@ -1361,20 +1488,6 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
-}
-
-fn expand_home(raw: &str) -> String {
-    if raw == "~" {
-        return std::env::var("HOME").unwrap_or_else(|_| raw.to_string());
-    }
-
-    if let Some(rest) = raw.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    }
-
-    raw.to_string()
 }
 
 fn toggle_path(paths: &mut HashSet<PathBuf>, path: PathBuf) {
@@ -1408,6 +1521,7 @@ mod tests {
     use super::{App, Tab, savings_meter_columns};
     use crate::age::AgeThreshold;
     use crate::cleanup::Cleaner;
+    use crate::profiles::Profiles;
     use crate::scanner::{DependencyFolder, DependencyKind, ScanSummary};
 
     struct RemovingCleaner;
@@ -1439,6 +1553,9 @@ mod tests {
             },
             AgeThreshold::days(7),
             String::new(),
+            Profiles::default(),
+            None,
+            false,
         )
     }
 
@@ -1520,6 +1637,9 @@ mod tests {
             },
             AgeThreshold::days(7),
             String::new(),
+            Profiles::default(),
+            None,
+            false,
         );
         app.selected
             .insert(PathBuf::from("/tmp/stale/node_modules"));
@@ -1634,7 +1754,14 @@ mod tests {
             crate::scanner::ScanOptions::default(),
         )
         .unwrap();
-        let mut app = App::new(scan, AgeThreshold::days(7), String::new());
+        let mut app = App::new(
+            scan,
+            AgeThreshold::days(7),
+            String::new(),
+            Profiles::default(),
+            None,
+            false,
+        );
         app.tab = Tab::Review;
         app.selected.insert(deps);
 
@@ -1646,6 +1773,50 @@ mod tests {
         assert!(app.scan.folders.is_empty());
         assert!(app.toast.is_some());
         assert!(app.message.contains("refreshed"));
+        assert!(app.message.contains("restore from OS trash"));
+        assert!(
+            app.toast
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("Restore from the OS trash")
+        );
+    }
+
+    #[test]
+    fn profile_switch_applies_roots_threshold_and_rescans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("app");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("package.json"), "{}").unwrap();
+        fs::create_dir(project.join("node_modules")).unwrap();
+        let profiles = Profiles::parse(&format!(
+            r#"
+            [profiles.work]
+            roots = ["{}"]
+            older_than = "7d"
+            "#,
+            tmp.path().display()
+        ))
+        .unwrap();
+        let mut app = App::new(
+            ScanSummary {
+                roots: vec![PathBuf::from("/tmp")],
+                folders: Vec::new(),
+            },
+            AgeThreshold::days(30),
+            String::new(),
+            profiles,
+            None,
+            false,
+        );
+
+        app.next_profile();
+
+        assert_eq!(app.active_profile.as_deref(), Some("work"));
+        assert_eq!(app.threshold.as_days(), 7);
+        assert_eq!(app.scan.folders.len(), 1);
+        assert!(app.selected.is_empty());
     }
 
     #[test]

@@ -47,7 +47,12 @@ pub fn print_report(scan: &ScanSummary, threshold: AgeThreshold, filter: Option<
     println!();
 
     println!("by ecosystem");
-    for kind in [DependencyKind::Node, DependencyKind::Python] {
+    for kind in [
+        DependencyKind::Node,
+        DependencyKind::Python,
+        DependencyKind::NpmCache,
+        DependencyKind::PipCache,
+    ] {
         let total: u64 = scan
             .folders
             .iter()
