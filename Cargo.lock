@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "nuked"
-version = "1.0.1"
+version = "1.3.1"
 dependencies = [
  "anyhow",
  "clap",

@@ -1,6 +1,6 @@
 [package]
 name = "nuked"
-version = "1.0.1"
+version = "1.3.1"
 edition = "2024"
 description = "Nuke stale project dependency folders."
 license = "GPL-3.0"
